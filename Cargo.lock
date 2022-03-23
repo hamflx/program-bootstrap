@@ -84,12 +84,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "goblin"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c955ab4e0ad8c843ea653a3d143048b87490d9be56bd7132a435c2407846ac8f"
+dependencies = [
+ "log",
+ "plain",
+ "scroll",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "hooks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "detour",
+ "log",
+ "serde",
+ "simple_logger",
+ "widestring",
+ "windows-sys",
+]
+
+[[package]]
+name = "iced-x86"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "158f5204401d08f91d19176112146d75e99b3cf745092e268fa7be33e09adcec"
+dependencies = [
+ "lazy_static",
+ "static_assertions",
 ]
 
 [[package]]
@@ -169,6 +204,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "plain"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -184,6 +225,22 @@ dependencies = [
  "anyhow",
  "bincode",
  "detour",
+ "hooks",
+ "log",
+ "serde",
+ "simple_logger",
+ "widestring",
+ "windows-sys",
+]
+
+[[package]]
+name = "program-bootstrap-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "detour",
+ "hooks",
  "log",
  "serde",
  "simple_logger",
@@ -213,6 +270,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "scroll"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04c565b551bafbef4157586fa379538366e4385d42082f255bfd96e4fe8519da"
+dependencies = [
+ "scroll_derive",
+]
+
+[[package]]
+name = "scroll_derive"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdbda6ac5cd1321e724fa9cee216f3a61885889b896f073b8f82322789c5250e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.136"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -233,6 +310,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "shellcode"
+version = "0.1.0"
+
+[[package]]
+name = "shellcode-gen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "goblin",
+ "iced-x86",
+]
+
+[[package]]
 name = "simple_logger"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -250,6 +340,12 @@ name = "slice-pool"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "733fc6e5f1bd3a8136f842c9bdea4e5f17c910c2fcc98c90c3aa7604ef5e2e7a"
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "syn"

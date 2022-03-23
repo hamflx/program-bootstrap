@@ -1,0 +1,9 @@
+[package]
+name = "shellcode-gen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.56"
+goblin = "0.5.1"
+iced-x86 = "1.10.0"

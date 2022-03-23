@@ -6,16 +6,21 @@ use std::{
     intrinsics::transmute,
     mem::MaybeUninit,
     ptr,
+    slice::from_raw_parts,
 };
 use widestring::U16CString;
 use windows_sys::{
     core::{PCSTR, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{GetLastError, BOOL, FARPROC, HANDLE},
+        Foundation::{GetLastError, BOOL, FARPROC, HANDLE, HINSTANCE},
         Security::SECURITY_ATTRIBUTES,
         System::{
             Diagnostics::Debug::{WriteProcessMemory, PROCESSOR_ARCHITECTURE_INTEL},
-            LibraryLoader::{GetModuleFileNameA, GetProcAddress, LoadLibraryA},
+            LibraryLoader::{
+                GetModuleFileNameA, GetModuleHandleExA, GetProcAddress, LoadLibraryA,
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            },
             Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE},
             SystemInformation::{GetNativeSystemInfo, SYSTEM_INFO},
             Threading::{
@@ -27,6 +32,8 @@ use windows_sys::{
     },
 };
 
+pub mod communication;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InjectOptions {
     pub server_address: Option<String>,
@@ -34,9 +41,19 @@ pub struct InjectOptions {
 
 #[repr(C)]
 #[derive(Serialize, Deserialize)]
-pub struct INJECT_OPTIONS_WRAPPER {
+pub struct InjectOptionsWrapper {
     pub len: usize,
     pub ptr: u64,
+}
+
+#[repr(C)]
+pub struct ShellCodeParam {
+    pub module_path: [u8; 1024],
+    pub enable_hook_name: [u8; 1024],
+    pub enable_hook_param_wrapper_ptr: *const c_void,
+    pub fp_get_proc_address:
+        unsafe extern "system" fn(isize, *const u8) -> unsafe extern "system" fn() -> isize,
+    pub fp_load_library: unsafe extern "system" fn(lplibfilename: PCSTR) -> HINSTANCE,
 }
 
 type FnCreateProcessW = unsafe extern "system" fn(
@@ -67,7 +84,8 @@ static_detour! {
   ) -> BOOL;
 }
 
-static LIBRARY_NAME: &str = "program_bootstrap_core.dll";
+static SHELLCODE_X86: &[u8] = include_bytes!("..\\..\\..\\dist\\shellcode-x86.bin");
+static SHELLCODE_X64: &[u8] = include_bytes!("..\\..\\..\\dist\\shellcode-x64.bin");
 
 #[allow(clippy::too_many_arguments)]
 fn detour_create_process(
@@ -128,6 +146,10 @@ fn detour_create_process(
 }
 
 pub fn enable_hook(opts: Option<InjectOptions>) {
+    info!(
+        "Module: {}",
+        get_module_file_name(get_self_module_handle().unwrap()).unwrap_or(String::new())
+    );
     unsafe {
         let fp_create_process: FnCreateProcessW =
             transmute(get_proc_address("CreateProcessW", "kernel32.dll").unwrap());
@@ -182,9 +204,6 @@ unsafe fn inject_to_process(
     process_handle: HANDLE,
     opts: &Option<InjectOptions>,
 ) -> anyhow::Result<()> {
-    let fp_enable_hook = get_proc_address("enable_hook", LIBRARY_NAME)
-        .ok_or_else(|| anyhow::anyhow!("No enable_hook function found"))?;
-
     let is_target_x86 = is_process_x86(process_handle)?;
     let is_self_x86 = is_process_x86(GetCurrentProcess())?;
     if is_target_x86 != is_self_x86 {
@@ -195,7 +214,10 @@ unsafe fn inject_to_process(
         ));
     }
 
-    let library_name_with_null = format!("{}\0", LIBRARY_NAME);
+    let library_name_with_null = format!(
+        "program_bootstrap_core-{}.dll\0",
+        if is_target_x86 { "x86" } else { "x64" }
+    );
     let core_module_handle = LoadLibraryA(library_name_with_null.as_ptr() as PCSTR);
     let mut core_full_name_buffer = [0u8; 4096];
     if core_module_handle == 0
@@ -239,18 +261,18 @@ unsafe fn inject_to_process(
             wait_result
         ));
     }
-    let mut module_handle: u32 = 0;
-    if GetExitCodeThread(load_library_thread, &mut module_handle as *mut u32) != 0
-        && module_handle == 0
+    let mut load_thread_exit_code: u32 = 0;
+    if GetExitCodeThread(load_library_thread, &mut load_thread_exit_code as *mut u32) != 0
+        && load_thread_exit_code == 0
     {
         return Err(anyhow::anyhow!("Remote LoadLibraryA failed"));
     }
 
-    let enable_hook_params = if let Some(opts) = opts {
+    let enable_hook_param_wrapper_ptr = if let Some(opts) = opts {
         let opts_bytes = bincode::serialize(opts)?;
         let opts_ptr = write_process_memory(process_handle, opts_bytes.as_slice())?;
         info!("Write options to address {:?}", opts_ptr);
-        let opts_wrapper = INJECT_OPTIONS_WRAPPER {
+        let opts_wrapper = InjectOptionsWrapper {
             len: opts_bytes.len(),
             ptr: opts_ptr as u64,
         };
@@ -261,34 +283,110 @@ unsafe fn inject_to_process(
     } else {
         ptr::null()
     };
-    let thread_handle = CreateRemoteThread(
+    let mut shellcode_param = ShellCodeParam {
+        enable_hook_name: [0; 1024],
+        fp_get_proc_address: transmute(
+            get_proc_address("GetProcAddress", "kernel32.dll")
+                .ok_or_else(|| anyhow::anyhow!("No GetProcAddress function found"))?,
+        ),
+        fp_load_library: transmute(
+            get_proc_address("LoadLibraryA", "kernel32.dll")
+                .ok_or_else(|| anyhow::anyhow!("No LoadLibraryA function found"))?,
+        ),
+        enable_hook_param_wrapper_ptr,
+        module_path: [0; 1024],
+    };
+    let enable_hook_name = "enable_hook\0".as_bytes();
+    shellcode_param.enable_hook_name[..enable_hook_name.len()]
+        .clone_from_slice("enable_hook\0".as_bytes());
+    let library_name_bytes = library_name_with_null.as_bytes();
+    shellcode_param.module_path[..library_name_bytes.len()].clone_from_slice(library_name_bytes);
+    let shellcode_param_ptr =
+        write_process_memory(process_handle, any_as_u8_slice(&shellcode_param))?;
+    let shellcode_ptr = write_process_memory(
+        process_handle,
+        if is_target_x86 {
+            SHELLCODE_X86
+        } else {
+            SHELLCODE_X64
+        },
+    )?;
+    info!("Write shellcode to address 0x{:x}", shellcode_ptr as isize);
+    let shellcode_thread_handle = CreateRemoteThread(
         process_handle,
         ptr::null(),
         0,
-        Some(transmute(fp_enable_hook)),
-        enable_hook_params,
+        Some(transmute(shellcode_ptr)),
+        shellcode_param_ptr,
         0,
         ptr::null_mut(),
     );
-    if thread_handle == 0 {
+    if shellcode_thread_handle == 0 {
         return Err(anyhow::anyhow!(
             "CreateRemoteThread failed: {}",
             GetLastError()
         ));
     }
     info!(
-        "Created enable_hook thread with id: {}",
-        GetThreadId(thread_handle)
+        "Created enable_hook thread with id: 0x{:x}",
+        GetThreadId(shellcode_thread_handle)
     );
-    let wait_result = WaitForSingleObject(thread_handle, 0xFFFFFFFF);
+    let wait_result = WaitForSingleObject(shellcode_thread_handle, 0xFFFFFFFF);
     if wait_result != 0 {
         return Err(anyhow::anyhow!(
             "WaitForSingleObject failed: {}",
             wait_result
         ));
     }
+    let mut hook_thread_exit_code = 0;
+    if GetExitCodeThread(shellcode_thread_handle, &mut hook_thread_exit_code) != 0
+        && hook_thread_exit_code != 1
+    {
+        return Err(anyhow::anyhow!(
+            "Remote enable_hook failed with code: 0x{:x}",
+            hook_thread_exit_code
+        ));
+    }
 
     Ok(())
+}
+
+fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+    unsafe { from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>()) }
+}
+
+fn get_module_file_name(instance_handle: HINSTANCE) -> anyhow::Result<String> {
+    let mut file_name_buffer = [0u8; 4096];
+    let file_name_len = unsafe {
+        GetModuleFileNameA(
+            instance_handle,
+            file_name_buffer.as_mut_ptr(),
+            file_name_buffer.len() as u32,
+        )
+    };
+    if file_name_len == 0 {
+        return Err(anyhow::anyhow!("GetModuleFileNameA failed: {}", unsafe {
+            GetLastError()
+        }));
+    }
+    Ok(String::from_utf8_lossy(&file_name_buffer[..file_name_len as usize]).to_string())
+}
+
+fn get_self_module_handle() -> anyhow::Result<HINSTANCE> {
+    let mut instance_handle: HINSTANCE = 0;
+    let result = unsafe {
+        GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            transmute(get_self_module_handle as *const ()),
+            &mut instance_handle,
+        )
+    };
+    if result == 0 {
+        return Err(anyhow::anyhow!("GetModuleHandleExA failed: {}", unsafe {
+            GetLastError()
+        }));
+    }
+    Ok(instance_handle)
 }
 
 fn is_process_x86(process_handle: HANDLE) -> anyhow::Result<bool> {

@@ -1,0 +1,17 @@
+[build]
+rustflags = [
+    # Pre Link Args
+    "-Z", "pre-link-arg=/NODEFAULTLIB",
+    "--emit", "asm",
+    # Post Link Args
+    "-C", "link-arg=/ENTRY:main",
+    "-C", "link-arg=/MERGE:.edata=.rdata",
+    "-C", "link-arg=/MERGE:.rustc=.data",
+    "-C", "link-arg=/MERGE:.rdata=.text",
+    "-C", "link-arg=/MERGE:.pdata=.text",
+    "-C", "link-arg=/DEBUG:NONE",
+    "-C", "link-arg=/EMITPOGOPHASEINFO",
+    "-C", "target-feature=-mmx,-sse,+soft-float",
+
+    "-C", "panic=abort"
+]

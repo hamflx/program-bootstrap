@@ -1,13 +1,8 @@
 use std::{env, process::Command};
 
-use communication::InterProcessComServer;
+use hooks::{communication::InterProcessComServer, InjectOptions};
 use log::info;
 use simple_logger::SimpleLogger;
-
-use crate::common::InjectOptions;
-
-mod common;
-mod communication;
 
 fn main() {
     SimpleLogger::new().init().unwrap();
@@ -18,7 +13,7 @@ fn main() {
 
     info!("Listening on {}", address.to_string());
 
-    common::enable_hook(Some(InjectOptions {
+    hooks::enable_hook(Some(InjectOptions {
         server_address: Some(address.to_string()),
     }));
 
