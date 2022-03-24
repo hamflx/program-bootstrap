@@ -26,8 +26,9 @@ use windows_sys::{
             Threading::{
                 CreateRemoteThread, GetCurrentProcess, GetExitCodeThread, GetThreadId,
                 IsWow64Process, ResumeThread, WaitForSingleObject, CREATE_SUSPENDED,
-                PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+                LPTHREAD_START_ROUTINE, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
             },
+            WindowsProgramming::CLIENT_ID,
         },
     },
 };
@@ -68,6 +69,19 @@ type FnCreateProcessW = unsafe extern "system" fn(
     *const STARTUPINFOW,
     *mut PROCESS_INFORMATION,
 ) -> BOOL;
+
+type FnRtlCreateUserThread = unsafe extern "system" fn(
+    hprocess: HANDLE,
+    lpthreadattributes: *const SECURITY_ATTRIBUTES,
+    suspended: BOOL,
+    stack_zero_bits: usize,
+    stack_reserved: *mut usize,
+    stack_commit: *mut usize,
+    lpstartaddress: LPTHREAD_START_ROUTINE,
+    lpparameter: *const ::core::ffi::c_void,
+    thread_handle: *mut HANDLE,
+    client_id: *mut CLIENT_ID,
+) -> isize;
 
 static_detour! {
   static HookCreateProcessW: unsafe extern "system" fn(
@@ -205,68 +219,18 @@ unsafe fn inject_to_process(
     opts: &Option<InjectOptions>,
 ) -> anyhow::Result<()> {
     let is_target_x86 = is_process_x86(process_handle)?;
-    let is_self_x86 = is_process_x86(GetCurrentProcess())?;
-    if is_target_x86 != is_self_x86 {
-        return Err(anyhow::anyhow!(
-            "Process architecture mismatch, expect {} got {}",
-            if is_target_x86 { "x86" } else { "x64" },
-            if is_self_x86 { "x86" } else { "x64" }
-        ));
-    }
 
-    let library_name_with_null = format!(
-        "program_bootstrap_core-{}.dll\0",
+    let library_name = format!(
+        "program_bootstrap_core-{}.dll",
         if is_target_x86 { "x86" } else { "x64" }
     );
-    let core_module_handle = LoadLibraryA(library_name_with_null.as_ptr() as PCSTR);
-    let mut core_full_name_buffer = [0u8; 4096];
-    if core_module_handle == 0
-        || GetModuleFileNameA(
-            core_module_handle,
-            core_full_name_buffer.as_mut_ptr(),
-            core_full_name_buffer.len() as u32,
-        ) == 0
-    {
-        return Err(anyhow::anyhow!(
-            "GetModuleFileNameA failed: {}",
-            GetLastError()
-        ));
-    }
-    let library_name_addr = write_process_memory(process_handle, &core_full_name_buffer)?;
-    let fp_load_library = get_proc_address("LoadLibraryA", "kernel32.dll")
-        .ok_or_else(|| anyhow::anyhow!("No LoadLibraryA function found"))?;
-    let load_library_thread = CreateRemoteThread(
-        process_handle,
-        ptr::null(),
-        0,
-        Some(transmute(fp_load_library)),
-        library_name_addr,
-        0,
-        ptr::null_mut(),
-    );
-    if load_library_thread == 0 {
-        return Err(anyhow::anyhow!(
-            "CreateRemoteThread failed: {}",
-            GetLastError()
-        ));
-    }
-    info!(
-        "Created LoadLibraryA thread with id: {}",
-        GetThreadId(load_library_thread)
-    );
-    let wait_result = WaitForSingleObject(load_library_thread, 0xFFFFFFFF);
-    if wait_result != 0 {
-        return Err(anyhow::anyhow!(
-            "WaitForSingleObject failed: {}",
-            wait_result
-        ));
-    }
-    let mut load_thread_exit_code: u32 = 0;
-    if GetExitCodeThread(load_library_thread, &mut load_thread_exit_code as *mut u32) != 0
-        && load_thread_exit_code == 0
-    {
-        return Err(anyhow::anyhow!("Remote LoadLibraryA failed"));
-    }
+    let library_name_with_null = format!("{}\0", library_name);
+    let mut core_dll_path = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    core_dll_path.push(library_name_with_null.clone());
 
     let enable_hook_param_wrapper_ptr = if let Some(opts) = opts {
         let opts_bytes = bincode::serialize(opts)?;
@@ -296,6 +260,10 @@ unsafe fn inject_to_process(
         enable_hook_param_wrapper_ptr,
         module_path: [0; 1024],
     };
+    info!(
+        "Shellcode param address: {:?}",
+        &shellcode_param as *const ShellCodeParam
+    );
     let enable_hook_name = "enable_hook\0".as_bytes();
     shellcode_param.enable_hook_name[..enable_hook_name.len()]
         .clone_from_slice("enable_hook\0".as_bytes());
@@ -303,6 +271,10 @@ unsafe fn inject_to_process(
     shellcode_param.module_path[..library_name_bytes.len()].clone_from_slice(library_name_bytes);
     let shellcode_param_ptr =
         write_process_memory(process_handle, any_as_u8_slice(&shellcode_param))?;
+    info!(
+        "Write shellcode param to address 0x{:x}",
+        shellcode_param_ptr as isize
+    );
     let shellcode_ptr = write_process_memory(
         process_handle,
         if is_target_x86 {
@@ -312,19 +284,31 @@ unsafe fn inject_to_process(
         },
     )?;
     info!("Write shellcode to address 0x{:x}", shellcode_ptr as isize);
-    let shellcode_thread_handle = CreateRemoteThread(
+    let rtl_create_user_thread: FnRtlCreateUserThread = transmute(
+        get_proc_address("GetProcAddress", "kernel32.dll")
+            .ok_or_else(|| anyhow::anyhow!("No GetProcAddress function found"))?,
+    );
+    let mut shellcode_thread_handle = 0;
+    let mut shellcode_thread_client_id = CLIENT_ID {
+        UniqueProcess: 0,
+        UniqueThread: 0,
+    };
+    let shellcode_thread_status = rtl_create_user_thread(
         process_handle,
         ptr::null(),
         0,
-        Some(transmute(shellcode_ptr)),
-        shellcode_param_ptr,
         0,
         ptr::null_mut(),
+        ptr::null_mut(),
+        transmute(shellcode_ptr),
+        shellcode_param_ptr,
+        &mut shellcode_thread_handle,
+        &mut shellcode_thread_client_id,
     );
-    if shellcode_thread_handle == 0 {
+    if shellcode_thread_status < 0 || shellcode_thread_handle == 0 {
         return Err(anyhow::anyhow!(
-            "CreateRemoteThread failed: {}",
-            GetLastError()
+            "rtl_create_user_thread failed: {}",
+            shellcode_thread_status
         ));
     }
     info!(
