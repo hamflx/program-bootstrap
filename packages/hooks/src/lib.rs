@@ -1,3 +1,5 @@
+#![feature(c_variadic)]
+
 use detour::static_detour;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -70,18 +72,12 @@ type FnCreateProcessW = unsafe extern "system" fn(
     *mut PROCESS_INFORMATION,
 ) -> BOOL;
 
-type FnRtlCreateUserThread = unsafe extern "system" fn(
-    hprocess: HANDLE,
-    lpthreadattributes: *const SECURITY_ATTRIBUTES,
-    suspended: BOOL,
-    stack_zero_bits: usize,
-    stack_reserved: *mut usize,
-    stack_commit: *mut usize,
-    lpstartaddress: LPTHREAD_START_ROUTINE,
-    lpparameter: *const ::core::ffi::c_void,
-    thread_handle: *mut HANDLE,
-    client_id: *mut CLIENT_ID,
-) -> isize;
+#[link(name = "libs/wow64ext")]
+extern "C" {
+    fn GetModuleHandle64(lpModuleName: PCWSTR) -> i64;
+    fn GetProcAddress64(module_handle: i64, funcName: PCSTR) -> i64;
+    fn X64Call(func: i64, argC: i32, ...) -> i64;
+}
 
 static_detour! {
   static HookCreateProcessW: unsafe extern "system" fn(
@@ -98,8 +94,10 @@ static_detour! {
   ) -> BOOL;
 }
 
-static SHELLCODE_X86: &[u8] = include_bytes!("..\\..\\..\\dist\\shellcode-x86.bin");
-static SHELLCODE_X64: &[u8] = include_bytes!("..\\..\\..\\dist\\shellcode-x64.bin");
+static SHELLCODE_X86: &[u8] =
+    include_bytes!("..\\..\\..\\target\\i686-pc-windows-msvc\\debug\\shellcode.bin");
+static SHELLCODE_X64: &[u8] =
+    include_bytes!("..\\..\\..\\target\\x86_64-pc-windows-msvc\\debug\\shellcode.bin");
 
 #[allow(clippy::too_many_arguments)]
 fn detour_create_process(
@@ -284,26 +282,33 @@ unsafe fn inject_to_process(
         },
     )?;
     info!("Write shellcode to address 0x{:x}", shellcode_ptr as isize);
-    let rtl_create_user_thread: FnRtlCreateUserThread = transmute(
-        get_proc_address("RtlCreateUserThread", "ntdll.dll")
-            .ok_or_else(|| anyhow::anyhow!("No GetProcAddress function found"))?,
-    );
+    let ntdll_name = U16CString::from_str("ntdll.dll").unwrap();
+    let ntdll_handle = GetModuleHandle64(ntdll_name.as_ptr());
+    if ntdll_handle == 0 {
+        return Err(anyhow::anyhow!("GetModuleHandle64 failed"));
+    }
+    let rtl_create_user_thread = GetProcAddress64(ntdll_handle, "RtlCreateUserThread\0".as_ptr());
+    if rtl_create_user_thread == 0 {
+        return Err(anyhow::anyhow!("GetProcAddress64 failed"));
+    }
     let mut shellcode_thread_handle = 0;
     let mut shellcode_thread_client_id = CLIENT_ID {
         UniqueProcess: 0,
         UniqueThread: 0,
     };
-    let shellcode_thread_status = rtl_create_user_thread(
-        process_handle,
-        ptr::null(),
-        0,
-        0,
-        ptr::null_mut(),
-        ptr::null_mut(),
-        transmute(shellcode_ptr),
-        shellcode_param_ptr,
-        &mut shellcode_thread_handle,
-        &mut shellcode_thread_client_id,
+    let shellcode_thread_status = X64Call(
+        rtl_create_user_thread,
+        10,
+        process_handle as i64,
+        0i64,
+        0i64,
+        0i64,
+        0i64,
+        0i64,
+        shellcode_ptr as i64,
+        shellcode_param_ptr as i64,
+        &mut shellcode_thread_handle as *mut _ as i64,
+        &mut shellcode_thread_client_id as *mut _ as i64,
     );
     if shellcode_thread_status < 0 || shellcode_thread_handle == 0 {
         return Err(anyhow::anyhow!(

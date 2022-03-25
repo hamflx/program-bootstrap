@@ -9,11 +9,11 @@ use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
 fn main() -> anyhow::Result<()> {
     gen_shellcode(
         "target\\x86_64-pc-windows-msvc\\debug\\shellcode.exe",
-        "dist\\shellcode-x64.bin",
+        "target\\x86_64-pc-windows-msvc\\debug\\shellcode.bin",
     )?;
     gen_shellcode(
         "target\\i686-pc-windows-msvc\\debug\\shellcode.exe",
-        "dist\\shellcode-x86.bin",
+        "target\\i686-pc-windows-msvc\\debug\\shellcode.bin",
     )?;
     Ok(())
 }
