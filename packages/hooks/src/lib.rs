@@ -285,7 +285,7 @@ unsafe fn inject_to_process(
     )?;
     info!("Write shellcode to address 0x{:x}", shellcode_ptr as isize);
     let rtl_create_user_thread: FnRtlCreateUserThread = transmute(
-        get_proc_address("GetProcAddress", "kernel32.dll")
+        get_proc_address("RtlCreateUserThread", "ntdll.dll")
             .ok_or_else(|| anyhow::anyhow!("No GetProcAddress function found"))?,
     );
     let mut shellcode_thread_handle = 0;
@@ -307,7 +307,7 @@ unsafe fn inject_to_process(
     );
     if shellcode_thread_status < 0 || shellcode_thread_handle == 0 {
         return Err(anyhow::anyhow!(
-            "rtl_create_user_thread failed: {}",
+            "rtl_create_user_thread failed: 0x{:x}",
             shellcode_thread_status
         ));
     }
